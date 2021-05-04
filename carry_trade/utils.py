@@ -42,6 +42,11 @@ def download_files(filename_frag: str):
             file.download(file.filename)
 
 
+# =============================================================================
+# Fetching Data
+# =============================================================================
+
+
 def fetch_ticker(
     dataset_code: str, query_params: Dict = None, database_code: str = "EOD"
 ):
@@ -67,6 +72,29 @@ def fetch_ticker(
         df["ticker"] = dataset["dataset_code"]
 
         return df.sort_values("date")
+
+
+# =============================================================================
+# Data Preparation
+# =============================================================================
+
+
+def compute_zcb_curve(spot_rates_curve):
+    zcb_rates = spot_rates_curve.copy()
+    for curve in spot_rates_curve.columns:
+        spot = spot_rates_curve[curve]
+        for tenor, spot_rate in spot.iteritems():
+            if tenor > 0.001:
+                times = np.arange(tenor - 0.5, 0, step=-0.5)[::-1]
+                coupon_half_yr = 0.5 * spot_rate
+                z = np.interp(
+                    times, zcb_rates[curve].index.values, zcb_rates[curve].values
+                )  # Linear interpolation
+                preceding_coupons_val = (coupon_half_yr * np.exp(-z * times)).sum()
+                zcb_rates[curve][tenor] = (
+                    -np.log((1 - preceding_coupons_val) / (1 + coupon_half_yr)) / tenor
+                )
+    return zcb_rates
 
 
 # =============================================================================
