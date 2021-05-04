@@ -56,7 +56,7 @@ if __name__ == "__main__":
     write_submit_file()
 
     if True:
-        assignment = course.get_assignment(carry_trade)
+        assignment = course.get_assignment(353166)
 
         submission = assignment.submit(
             dict(

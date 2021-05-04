@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import quandl
+import requests
 from canvasapi import Canvas
 from plotly import colors
 from plotly.subplots import make_subplots
@@ -39,6 +40,33 @@ def download_files(filename_frag: str):
             print(f.filename, f.id)
             file = course.get_file(f.id)
             file.download(file.filename)
+
+
+def fetch_ticker(
+    dataset_code: str, query_params: Dict = None, database_code: str = "EOD"
+):
+    """Fetches price data for a single ticker."""
+
+    url = f"https://www.quandl.com/api/v3/datasets/{database_code}/{dataset_code}.json"
+
+    params = dict(api_key=os.getenv("QUANDL_API_KEY"))
+    if query_params is not None:
+        params = dict(**params, **query_params)
+
+    r = requests.get(url, params=params)
+
+    if r.status_code != 200:
+        print(r.text)
+
+    else:
+        dataset = r.json()["dataset"]
+
+        df = pd.DataFrame(
+            dataset["data"], columns=[c.lower() for c in dataset["column_names"]]
+        )
+        df["ticker"] = dataset["dataset_code"]
+
+        return df.sort_values("date")
 
 
 # =============================================================================
