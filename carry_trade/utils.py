@@ -1,8 +1,6 @@
-import gzip
 import os
 from pathlib import Path
-from tracemalloc import start
-from typing import Dict, List, Union
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -82,7 +80,62 @@ def fetch_ticker(
 
 
 # =============================================================================
-# Data Preparation
+# Data Fetching
+# =============================================================================
+
+
+def reindex_and_interpolate(df, yc: bool = False):
+    """Reindexes and linearly interpolates to have data on every date in the
+    sequence.
+    """
+    df.date = pd.to_datetime(df.date)
+    df = df.set_index("date")
+    df = df.reindex(pd.date_range(df.index.min(), df.index.max())).iloc[:, :-1]
+    df = df.interpolate(axis=0)
+    if yc:
+        df = df.interpolate(axis=1)
+
+    return df
+
+
+def load_yc(tickers: List) -> Dict:
+    """Loads yield curves."""
+
+    dfs_yc = {t: pd.read_csv(f"data/df_{t}.csv") for t in tickers}
+
+    for k in dfs_yc:
+        dfs_yc[k] = reindex_and_interpolate(dfs_yc[k], yc=True)
+
+    return dfs_yc
+
+
+def load_fx(currencies: List) -> Dict:
+    """Load foreign exchange rates."""
+
+    dfs_fx = {c: pd.read_csv(f"data/df_fx_{c}.csv") for c in currencies}
+
+    for k in dfs_fx:
+        dfs_fx[k] = reindex_and_interpolate(dfs_fx[k])
+
+    return dfs_fx
+
+
+def load_libor(libors: List) -> Dict:
+    """Loads 3 month libors."""
+
+    dfs_libor = {l: pd.read_csv(f"data/df_libor_{l}.csv") for l in libors}
+    dfs_libor["JPY3MTD156N"].value = (
+        dfs_libor["JPY3MTD156N"].value.replace(".", None).astype(float)
+    )
+
+    for k in dfs_libor:
+        dfs_libor[k] = reindex_and_interpolate(dfs_libor[k])
+
+    return dfs_libor
+
+
+# =============================================================================
+# Curve Calculations
 # =============================================================================
 
 
@@ -141,301 +194,107 @@ def bond_price(zcb, coupon_rate, tenor):
     return p
 
 
-def get_coupon_dates(
-    start_date: pd.Timestamp, coupon_freq: int = 3, max_tenor: int = 60
-) -> pd.Series:
-    "Takes a start date and returns Series of quarterly dates."
-
-    coupon_dates = []
-    tenor = coupon_freq
-    while tenor <= max_tenor:
-        coupon_dates.append(start_date + pd.DateOffset(months=tenor))
-        tenor += coupon_freq
-
-    return pd.Series(coupon_dates, name="coupon_date")
-
-
-def interpolate_spot_rates_curve(
-    spot_rates_curve: pd.Series,
-    start_date: Union[pd.Timestamp, str],
-    coupon_freq: int = 3,
-    max_tenor: int = 60,
-) -> pd.DataFrame:
-    """Takes a spot rates curve as returned by quandl, interpolates rates at dates as
-    determined by coupon frequency.
-    """
-
-    if type(start_date) == str:
-        start_date = pd.Timestamp(start_date)
-
-    yc_dates = []
-    for i in spot_rates_curve.index:
-        n, per = i.split("-")
-        n = int(n)
-        yc_dates.append(start_date + pd.DateOffset(**{f"{per}s": n}))
-
-    spot_rates_curve.index = yc_dates
-    spot_rates_curve.name = "rate"
-    spot_rates_curve = spot_rates_curve.astype(float)
-    spot_rates_curve = (
-        spot_rates_curve.to_frame()
-        .reindex(get_coupon_dates(start_date, coupon_freq, max_tenor))
-        .interpolate()
-        / 100
-    )
-
-    return spot_rates_curve
-
-
-def compute_zcb_curve_cse(
-    spot_rates_curve: pd.DataFrame,
-    start_date: pd.Timestamp,
-    min_non_zero_tenor: int = 15,
-) -> pd.DataFrame:
-    """Takes a spot rates curve, start date and minimum zero tenor and returns
-    a zero coupon bond curve.
-    """
-
-    zero_rates = spot_rates_curve.copy()
-    zero_rates["tenor"] = (spot_rates_curve.index - start_date).days / 365
-
-    min_non_zero_date = start_date + pd.DateOffset(months=min_non_zero_tenor)
-
-    prior_date = start_date
-    for coupon_date, (spot_rate, tenor) in zero_rates.iterrows():
-        coupon_rate = (
-            round(((coupon_date - prior_date).days / 365) * 12) / 12 * spot_rate
-        )
-
-        if coupon_date < min_non_zero_date:
-            zero_rate = spot_rate
-        else:
-            zero_rate = (
-                -np.log(
-                    (
-                        1
-                        - coupon_rate
-                        * np.exp(
-                            -zero_rates.loc[:prior_date].rate
-                            * zero_rates.loc[:prior_date].tenor
-                        ).sum()
-                    )
-                    / (1 + coupon_rate)
-                )
-                / tenor
-            )
-
-        print(coupon_date, prior_date, coupon_rate * 4, zero_rate)
-        zero_rates.loc[coupon_date, "rate"] = zero_rate
-        prior_date = coupon_date
-
-    zero_rates["spot_rate"] = spot_rates_curve.rate
-
-    return zero_rates
-
-
-def get_bond_cash_flows(
-    annual_rate: float,
-    notional: float,
-    start_date: pd.Timestamp,
-    coupon_freq: int = 3,
-    max_tenor: int = 60,
-) -> pd.DataFrame:
-    """Takes a rate, notional amount and schedule and returns a dataframe of
-    cash flows indexed by the schedule dates.
-    """
-
-    schedule = get_coupon_dates(start_date, coupon_freq, max_tenor)
-    pmts_per_year = (schedule[1].to_period("M") - schedule[0].to_period("M")).n
-
-    cash_flows = np.repeat(annual_rate * (pmts_per_year / 12) * notional, len(schedule))
-    cash_flows[-1] += notional
-
-    s_cash_flows = pd.Series(cash_flows, index=schedule)
-    s_cash_flows.name = "cash_flow"
-
-    return s_cash_flows
-
-
-# =============================================================================
-# Reading Data
-# =============================================================================
-
-
-def get_trade_data(pair: str, year: str, path: str = "accumulation_opportunity/data"):
-    """Reads local gzipped trade data file and return dataframe."""
-
-    dtypes = {
-        "PriceMillionths": int,
-        "Side": int,
-        "SizeBillionths": int,
-        "timestamp_utc_nanoseconds": int,
-    }
-
-    filename = f"trades_narrow_{pair}_{year}.delim.gz"
-    delimiter = {"2018": "|", "2021": "\t"}[year]
-
-    with gzip.open(f"{path}/{filename}") as f:
-        df = pd.read_csv(f, delimiter=delimiter, usecols=dtypes.keys(), dtype=dtypes)
-
-    df.timestamp_utc_nanoseconds = pd.to_datetime(df.timestamp_utc_nanoseconds)
-
-    return df.set_index("timestamp_utc_nanoseconds")
-
-
 # =============================================================================
 # Strategy
 # =============================================================================
 
 
-def get_accum_df(
-    df: pd.DataFrame,
-    arrival_time: str = "2018-04-08 22:05",
-    quantity=3.25e9,
-    side: int = 1,
-    participation=0.050,
-    max_trade_participation=0.10,
-    chunk_size=6.5e9,
-    price_window_ms=200,
-):
-    """Creates accumulation data frame that trades can be calculated from."""
+def run_strategy(
+    yc_L: str,
+    fx_B: str,
+    fx_L: str,
+    libor: str,
+    leverage: float,
+    date_range: pd.date_range,
+    dfs_yc: Dict,
+    dfs_fx: Dict,
+    dfs_libor: Dict,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Runs carry trade strategy.
 
-    # Create accumulation dataframe
-    df_accum = df.loc[arrival_time:].copy()
-    df_accum["CumSizeBillionths"] = df_accum.SizeBillionths.cumsum()
+    Args:
+        yc: yield curve
+        fx: foreign exchange rate
+        libor: 3 month libor rate
+        H: Home market - USD
+        B: Borrowing market
+        L: Lending market
+        Lev: Leverage
+        K: Capital
+        0: Beginning of period
+        1: End of period
 
-    df_accum = df_accum[df_accum.Side == side].copy()
-
-    price_agg = {1: "max", -1: "min"}[side]
-    df_accum = (
-        df_accum.reset_index()
-        .groupby("timestamp_utc_nanoseconds")
-        .agg(
-            {
-                "CumSizeBillionths": "max",
-                "SizeBillionths": "sum",
-                "PriceMillionths": price_agg,
-                "Side": "first",
-            }
-        )
-    )
-
-    df_accum["CumChunks"] = df_accum.CumSizeBillionths.floordiv(chunk_size)
-    df_accum["CumParticipation"] = (
-        (
-            (
-                df_accum.CumChunks.map(
-                    df_accum.groupby("CumChunks").min()["CumSizeBillionths"].iloc[1:]
-                )
-                * participation
-            )
-            .fillna(0)
-            .apply(lambda x: min(x, quantity))
-        )
-        .round()
-        .astype(int)
-    )
-
-    df_accum["TradePrice"] = (
-        df_accum.PriceMillionths.sort_index(ascending=False)
-        .rolling(f"{price_window_ms}ms")
-        .agg(price_agg)
-        .sort_index()
-    )
-
-    df_accum["QualifiedTrade"] = df_accum["TradePrice"] == df_accum["PriceMillionths"]
-
-    df_accum["MaxTradeSize"] = round(
-        df_accum.SizeBillionths * max_trade_participation, 0
-    )
-
-    # Calculate trades
-    df_trades = get_trades_df(df_accum)
-    assert (
-        df_trades.StratTradeSize.sum() == quantity
-    ), "Sum of trades does not equal quantity."
-
-    # Prepare result record
-    S0 = df_accum.iloc[0].PriceMillionths
-    VWAP = round(
-        df_trades.StratTradePrice.astype(object).dot(
-            df_trades.StratTradeSize.astype(object)
-        )
-        / quantity
-    )
-    IS = VWAP / S0 - 1 if side else 1 - VWAP / S0
-
-    completion_time = df_trades.index.max()
-
-    result = dict(
-        quantity=int(quantity),
-        side=side,
-        S0=S0,
-        VWAP=VWAP,
-        IS=IS,
-        n_trades=len(df_trades),
-        mean_trade_size=int(df_trades.StratTradeSize.mean()),
-        arrival_time=df_accum.index.min(),
-        completion_time=completion_time,
-        execution_time=completion_time - df_accum.index.min(),
-        participation=participation,
-        max_trade_participation=max_trade_participation,
-        chunk_size=int(chunk_size),
-        price_window_ms=price_window_ms,
-    )
-
-    return df_accum.loc[: df_trades.index.max()], df_trades, result
-
-
-def get_trades_df(df_accum: pd.DataFrame) -> pd.DataFrame:
-    """Calculates trades from accumulation dataframe."""
-
-    trades = []
-    cum_trades = 0
-    tick_idx = 0
-    while cum_trades < df_accum.CumParticipation.max():
-        tick = df_accum.iloc[tick_idx]
-
-        if tick.CumParticipation - cum_trades > 0 and tick.QualifiedTrade:
-            trade_size = min(tick.CumParticipation - cum_trades, tick.MaxTradeSize)
-            trades.append((tick.name, trade_size, tick.TradePrice))
-            cum_trades += trade_size
-
-        tick_idx += 1
-
-    df_trades = (
-        pd.DataFrame(
-            trades,
-            columns=["timestamp_utc_nanoseconds", "StratTradeSize", "StratTradePrice"],
-        )
-        .set_index("timestamp_utc_nanoseconds")
-        .astype(int)
-    )
-
-    return df_trades
-
-
-def get_results_df(df: pd.DataFrame, params: Dict, nobs: int = 100) -> pd.DataFrame:
-    """Runs strategy for given number of observations and returns results
-    dataframe.
+    Returns:
+        Returns dataframe, profit components dataframe
     """
 
-    results = []
-    while len(results) < nobs:
-        params["arrival_time"] = np.random.choice(df.index.unique())
-        try:
-            results.append(get_accum_df(df, **params)[-1])
-        except:
-            pass
+    yc_slice = dict(THA=slice(1, 8), IDN=slice(0, 5), ROU=slice(0, 4))[yc_L]
 
-    return pd.DataFrame(results)
+    returns = []
+    profits = []
+    for d0, d1 in zip(date_range[:-1], date_range[1:]):
+        fx_B0 = dfs_fx[fx_B].loc[d0].rate
+        fx_B1 = dfs_fx[fx_B].loc[d1].rate
+        fx_L0 = dfs_fx[fx_L].loc[d0].rate
+        fx_L1 = dfs_fx[fx_L].loc[d1].rate
+        yc_L0 = dfs_yc[yc_L].loc[d0]
+        yc_L1 = dfs_yc[yc_L].loc[d1]
+        libor_L0 = dfs_libor[libor].loc[d0].value + 0.50
+
+        src_L0 = get_spot_curve(yc_L0[yc_slice])
+        zcb_L0 = compute_zcb_curve(src_L0)
+
+        src_L1 = get_spot_curve(yc_L1[yc_slice])
+        zcb_L1 = compute_zcb_curve(src_L1)
+
+        zcb_L1_interp = get_zcb_interp(zcb_L1, (d1 - d0).days)
+
+        K_H0 = float(2e6)
+        K_B0 = K_H0 * fx_B0
+        Lev_B0 = K_B0 / (1 - leverage) * leverage
+        I_B1 = Lev_B0 * libor_L0 / 100 * (d1 - d0).days / 360
+
+        V_B0 = K_B0 + Lev_B0
+        V_L0 = (V_B0 * fx_L0) / fx_B0
+        N_L0 = V_L0 / np.exp(-zcb_L0.rate.values[-1] * zcb_L0.index.values[-1])
+        V_L1 = N_L0 * np.exp(
+            -zcb_L1_interp.rate.values[-1] * zcb_L1_interp.index.values[-1]
+        )
+
+        V_B1 = V_L1 / fx_L1 * fx_B1
+        K_B1 = V_B1 - Lev_B0 - I_B1
+        K_H1 = K_B1 / fx_B1
+        r_H1 = np.log(K_H1 / K_H0)
+
+        returns.append((d1, r_H1))
+
+        # Approximate components of home currency profit split between
+        # (i) change in bond value, (ii) lending market fx, (iii) borrowing
+        # market fx and (iv) interest expense.
+        profits.append(
+            (
+                d1,
+                (V_L1 - V_L0) / fx_L0,
+                (V_L0 / fx_L1 - V_L0 / fx_L0) * (1 - leverage),
+                K_B0 / fx_B1 - K_B0 / fx_B0,
+                -I_B1 / fx_B0,
+                K_H1 - K_H0,
+            )
+        )
+
+    df_ret = pd.DataFrame(returns, columns=["date", "weekly_return"]).set_index("date")
+    df_profit = pd.DataFrame(
+        profits, columns=["date", "lend", "fx_LB", "fx_BH", "interest", "total"]
+    ).set_index("date")
+
+    return df_ret, df_profit
 
 
 # =============================================================================
 # Charts
 # =============================================================================
 
-COLORS = colors.qualitative.D3
+COLORS = colors.qualitative.T10
 
 IS_labels = [
     ("obs", lambda x: f"{x:>16d}"),
@@ -493,6 +352,96 @@ def get_moments_annotation(
         xanchor=xanchor,
         yanchor="top",
     )
+
+
+def make_components_chart(
+    yc_L: str,
+    fx_B: str,
+    fx_L: str,
+    libor: str,
+    leverage: float,
+    date_range: pd.date_range,
+    dfs_yc: Dict,
+    dfs_fx: Dict,
+    dfs_libor: Dict,
+):
+
+    fig = make_subplots(
+        rows=2,
+        cols=2,
+        subplot_titles=[
+            f"Change in 5-Year Yield: {yc_L}",
+            f"Change in FX Rate: {fx_B}:USD",
+            f"3 Month Libor: {libor}",
+            f"Change in FX Rate: {fx_L}:USD",
+        ],
+        vertical_spacing=0.09,
+        horizontal_spacing=0.08,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=date_range,
+            y=dfs_yc[yc_L].loc[date_range]["5-year"].pct_change(),
+            line=dict(width=1, color=COLORS[0]),
+            name=yc_L,
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=date_range,
+            y=dfs_fx[fx_B].loc[date_range].rate.pct_change(),
+            line=dict(width=1, color=COLORS[0]),
+            name=fx_B,
+        ),
+        row=1,
+        col=2,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=date_range,
+            y=dfs_libor[libor].loc[date_range].value,
+            line=dict(width=1, color=COLORS[0]),
+            name=libor,
+        ),
+        row=2,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=date_range,
+            y=dfs_fx[fx_L].loc[date_range].loc[date_range].rate.pct_change(),
+            line=dict(width=1, color=COLORS[0]),
+            name=fx_L,
+        ),
+        row=2,
+        col=2,
+    )
+
+    fig.update_xaxes(showline=True, linewidth=1, linecolor="black", mirror=True)
+    fig.update_yaxes(showline=True, linewidth=1, linecolor="black", mirror=True)
+
+    fig.update_layout(
+        title_text=(
+            f"Weekly Carry Trade: Borrow {fx_B} and Lend {fx_L}"
+            f"<br>{date_range.min().strftime('%Y-%m-%d')}"
+            f" - {date_range.max().strftime('%Y-%m-%d')}"
+        ),
+        showlegend=False,
+        height=600,
+        font=dict(size=10),
+        margin=dict(l=50, r=50, b=50, t=80),
+    )
+
+    for i in fig["layout"]["annotations"]:
+        i["font"]["size"] = 12
+
+    return fig
 
 
 def make_trade_prices_chart(
