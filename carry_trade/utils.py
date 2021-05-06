@@ -1,6 +1,8 @@
 import gzip
 import os
-from typing import Dict, List
+from pathlib import Path
+from tracemalloc import start
+from typing import Dict, List, Union
 
 import numpy as np
 import pandas as pd
@@ -35,11 +37,16 @@ def download_files(filename_frag: str):
     canvas = Canvas(url, token)
     course = canvas.get_course(course_id)
 
+    existing_files = [p.name for p in Path().iterdir() if filename_frag in p.name]
+
     for f in course.get_files():
-        if filename_frag in f.filename:
-            print(f.filename, f.id)
-            file = course.get_file(f.id)
-            file.download(file.filename)
+        if filename_frag in f.filename and f.filename not in existing_files:
+            try:
+                print(f.filename, f.id)
+                file = course.get_file(f.id)
+                file.download(file.filename)
+            except:
+                print(f.filename, f.id, "not downloaded")
 
 
 # =============================================================================
@@ -79,14 +86,30 @@ def fetch_ticker(
 # =============================================================================
 
 
+def get_spot_curve(spot_rates_curve: pd.Series):
+    tenors = []
+    for i in spot_rates_curve.index:
+        n, per = i.split("-")
+        n = int(n)
+        tenor = n / 12 if per == "month" else n
+        tenors.append(tenor)
+
+    spot_rates_curve.index = tenors
+
+    spot_rates_curve.name = "rate"
+    spot_rates_curve = spot_rates_curve.astype(float) / 100
+
+    return spot_rates_curve.to_frame()
+
+
 def compute_zcb_curve(spot_rates_curve):
     zcb_rates = spot_rates_curve.copy()
     for curve in spot_rates_curve.columns:
         spot = spot_rates_curve[curve]
         for tenor, spot_rate in spot.iteritems():
             if tenor > 0.001:
-                times = np.arange(tenor - 0.5, 0, step=-0.5)[::-1]
-                coupon_half_yr = 0.5 * spot_rate
+                times = np.arange(tenor - 0.25, 0, step=-0.25)[::-1]
+                coupon_half_yr = 0.25 * spot_rate
                 z = np.interp(
                     times, zcb_rates[curve].index.values, zcb_rates[curve].values
                 )  # Linear interpolation
@@ -95,6 +118,143 @@ def compute_zcb_curve(spot_rates_curve):
                     -np.log((1 - preceding_coupons_val) / (1 + coupon_half_yr)) / tenor
                 )
     return zcb_rates
+
+
+def get_zcb_interp(zcb: pd.Series, n_days: int = 7):
+
+    times = zcb.index.values - n_days / 365
+    zcb_interp = np.interp(times, zcb.index.values, zcb.rate)
+
+    zcb_interp = pd.Series(zcb_interp, index=times)
+    zcb_interp.name = "rate"
+
+    return zcb_interp.to_frame()
+
+
+def bond_price(zcb, coupon_rate, tenor):
+    times = np.arange(tenor, 0, step=-0.25)[::-1]
+    if times.shape[0] == 0:
+        p = 1.0
+    else:
+        r = np.interp(times, zcb.index.values, zcb.rate.values)  # Linear interpolation
+        p = np.exp(-tenor * r[-1]) + 0.25 * coupon_rate * np.exp(-r * times).sum()
+    return p
+
+
+def get_coupon_dates(
+    start_date: pd.Timestamp, coupon_freq: int = 3, max_tenor: int = 60
+) -> pd.Series:
+    "Takes a start date and returns Series of quarterly dates."
+
+    coupon_dates = []
+    tenor = coupon_freq
+    while tenor <= max_tenor:
+        coupon_dates.append(start_date + pd.DateOffset(months=tenor))
+        tenor += coupon_freq
+
+    return pd.Series(coupon_dates, name="coupon_date")
+
+
+def interpolate_spot_rates_curve(
+    spot_rates_curve: pd.Series,
+    start_date: Union[pd.Timestamp, str],
+    coupon_freq: int = 3,
+    max_tenor: int = 60,
+) -> pd.DataFrame:
+    """Takes a spot rates curve as returned by quandl, interpolates rates at dates as
+    determined by coupon frequency.
+    """
+
+    if type(start_date) == str:
+        start_date = pd.Timestamp(start_date)
+
+    yc_dates = []
+    for i in spot_rates_curve.index:
+        n, per = i.split("-")
+        n = int(n)
+        yc_dates.append(start_date + pd.DateOffset(**{f"{per}s": n}))
+
+    spot_rates_curve.index = yc_dates
+    spot_rates_curve.name = "rate"
+    spot_rates_curve = spot_rates_curve.astype(float)
+    spot_rates_curve = (
+        spot_rates_curve.to_frame()
+        .reindex(get_coupon_dates(start_date, coupon_freq, max_tenor))
+        .interpolate()
+        / 100
+    )
+
+    return spot_rates_curve
+
+
+def compute_zcb_curve_cse(
+    spot_rates_curve: pd.DataFrame,
+    start_date: pd.Timestamp,
+    min_non_zero_tenor: int = 15,
+) -> pd.DataFrame:
+    """Takes a spot rates curve, start date and minimum zero tenor and returns
+    a zero coupon bond curve.
+    """
+
+    zero_rates = spot_rates_curve.copy()
+    zero_rates["tenor"] = (spot_rates_curve.index - start_date).days / 365
+
+    min_non_zero_date = start_date + pd.DateOffset(months=min_non_zero_tenor)
+
+    prior_date = start_date
+    for coupon_date, (spot_rate, tenor) in zero_rates.iterrows():
+        coupon_rate = (
+            round(((coupon_date - prior_date).days / 365) * 12) / 12 * spot_rate
+        )
+
+        if coupon_date < min_non_zero_date:
+            zero_rate = spot_rate
+        else:
+            zero_rate = (
+                -np.log(
+                    (
+                        1
+                        - coupon_rate
+                        * np.exp(
+                            -zero_rates.loc[:prior_date].rate
+                            * zero_rates.loc[:prior_date].tenor
+                        ).sum()
+                    )
+                    / (1 + coupon_rate)
+                )
+                / tenor
+            )
+
+        print(coupon_date, prior_date, coupon_rate * 4, zero_rate)
+        zero_rates.loc[coupon_date, "rate"] = zero_rate
+        prior_date = coupon_date
+
+    zero_rates["spot_rate"] = spot_rates_curve.rate
+
+    return zero_rates
+
+
+def get_bond_cash_flows(
+    annual_rate: float,
+    notional: float,
+    start_date: pd.Timestamp,
+    coupon_freq: int = 3,
+    max_tenor: int = 60,
+) -> pd.DataFrame:
+    """Takes a rate, notional amount and schedule and returns a dataframe of
+    cash flows indexed by the schedule dates.
+    """
+
+    schedule = get_coupon_dates(start_date, coupon_freq, max_tenor)
+    pmts_per_year = (schedule[1].to_period("M") - schedule[0].to_period("M")).n
+
+    cash_flows = np.repeat(annual_rate * (pmts_per_year / 12) * notional, len(schedule))
+    cash_flows[-1] += notional
+
+    s_cash_flows = pd.Series(cash_flows, index=schedule)
+    s_cash_flows.name = "cash_flow"
+
+    return s_cash_flows
 
 
 # =============================================================================
