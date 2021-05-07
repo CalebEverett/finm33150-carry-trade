@@ -48,7 +48,7 @@ def download_files(filename_frag: str):
 
 
 # =============================================================================
-# Fetching Data
+# Fetch Data
 # =============================================================================
 
 
@@ -79,8 +79,24 @@ def fetch_ticker(
         return df.sort_values("date")
 
 
+def get_yc(ticker):
+    """Fetches yield curves and saves to csv."""
+
+    fetch_ticker(ticker, database_code="YC").to_csv(
+        f"data/df_{ticker}.csv", index=False
+    )
+
+
+def get_fx(currency: str, start_date: str):
+    """Fetches fx rates and saves to csv."""
+
+    fetch_ticker(currency, database_code="CUR").to_csv(
+        f"data/df_fx_{currency}.csv", index=False
+    )
+
+
 # =============================================================================
-# Data Fetching
+# Load Data
 # =============================================================================
 
 
@@ -268,24 +284,51 @@ def run_strategy(
 
         returns.append((d1, r_H1))
 
-        # Approximate components of home currency profit split between
-        # (i) change in bond value, (ii) lending market fx, (iii) borrowing
-        # market fx and (iv) interest expense.
         profits.append(
             (
                 d1,
-                (V_L1 - V_L0) / fx_L0,
-                (V_L0 / fx_L1 - V_L0 / fx_L0) * (1 - leverage),
-                K_B0 / fx_B1 - K_B0 / fx_B0,
-                -I_B1 / fx_B0,
-                K_H1 - K_H0,
+                fx_B0,
+                fx_B1,
+                fx_L0,
+                fx_L1,
+                zcb_L0.rate.values[-1],
+                zcb_L0.index.values[-1],
+                zcb_L1_interp.rate.values[-1],
+                zcb_L1_interp.index.values[-1],
+                V_L0,
+                N_L0,
+                V_L1,
+                V_B0,
+                V_B1,
+                K_H0,
+                K_H1,
+                r_H1,
             )
         )
 
     df_ret = pd.DataFrame(returns, columns=["date", "per_return"]).set_index("date")
     df_profit = pd.DataFrame(
-        profits, columns=["date", "lend", "fx_LB", "fx_BH", "interest", "total"]
-    ).set_index("date")
+        profits,
+        columns=[
+            "d1",
+            "fx_B0",
+            "fx_B1",
+            "fx_L0",
+            "fx_L1",
+            "zcb_L0",
+            "zcb_L0t",
+            "zcb_L1",
+            "zcb_L1t",
+            "V_L0",
+            "N_L0",
+            "V_L1",
+            "V_B0",
+            "V_B1",
+            "K_H0",
+            "K_H1",
+            "r_H1",
+        ],
+    ).set_index("d1")
 
     df_ret.name = f"{fx_B},{yc_L}"
 
@@ -365,14 +408,20 @@ def make_components_chart(
         cols=2,
         subplot_titles=[
             f"5-Year Yield: {yc_L}",
-            f"FX Rate: {fx_B}:USD",
+            f"FX Rate: {fx_L}:{fx_B}",
             f"3 Month Libor: {libor}",
-            f"FX Rate: {fx_L}:USD",
+            f"FX Rate: {fx_B}:USD",
         ],
         vertical_spacing=0.09,
         horizontal_spacing=0.08,
+        specs=[
+            [{"secondary_y": True}, {"secondary_y": True}],
+            [{"secondary_y": False}, {"secondary_y": True}],
+        ],
     )
 
+    # Lend market yield
+    # =================
     fig.add_trace(
         go.Scatter(
             x=date_range,
@@ -382,8 +431,23 @@ def make_components_chart(
         ),
         row=1,
         col=1,
+        secondary_y=False,
     )
 
+    fig.add_trace(
+        go.Scatter(
+            x=date_range,
+            y=dfs_yc[yc_L].loc[date_range]["5-year"].pct_change() * 100,
+            line=dict(width=1, color=COLORS[1], dash="dot"),
+            name=yc_L,
+        ),
+        row=1,
+        col=1,
+        secondary_y=True,
+    )
+
+    # Borrow market fx
+    # =================
     fig.add_trace(
         go.Scatter(
             x=date_range,
@@ -391,10 +455,25 @@ def make_components_chart(
             line=dict(width=1, color=COLORS[0]),
             name=fx_B,
         ),
-        row=1,
+        row=2,
         col=2,
+        secondary_y=False,
     )
 
+    fig.add_trace(
+        go.Scatter(
+            x=date_range,
+            y=dfs_fx[fx_B].loc[date_range].rate.pct_change() * 100,
+            line=dict(width=1, color=COLORS[1], dash="dot"),
+            name=fx_B,
+        ),
+        row=2,
+        col=2,
+        secondary_y=True,
+    )
+
+    # Borrow market funding cost
+    # =================
     fig.add_trace(
         go.Scatter(
             x=date_range,
@@ -406,19 +485,41 @@ def make_components_chart(
         col=1,
     )
 
+    # Lend market fx cost
+    # =================
+    fx_BL = (
+        dfs_fx[fx_L].loc[date_range].loc[date_range].rate
+        / dfs_fx[fx_B].loc[date_range].rate
+    )
+
     fig.add_trace(
         go.Scatter(
             x=date_range,
-            y=dfs_fx[fx_L].loc[date_range].loc[date_range].rate,
+            y=fx_BL,
             line=dict(width=1, color=COLORS[0]),
             name=fx_L,
         ),
-        row=2,
+        row=1,
         col=2,
+        secondary_y=False,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=date_range,
+            y=fx_BL.pct_change() * 100,
+            line=dict(width=1, color=COLORS[1], dash="dot"),
+            name=fx_L,
+        ),
+        row=1,
+        col=2,
+        secondary_y=True,
     )
 
     fig.update_xaxes(showline=True, linewidth=1, linecolor="grey", mirror=True)
-    fig.update_yaxes(showline=True, linewidth=1, linecolor="grey", mirror=True)
+    fig.update_yaxes(
+        showline=True, linewidth=1, linecolor="grey", mirror=True, tickformat="0.1f"
+    )
 
     fig.update_layout(
         title_text=(
@@ -430,7 +531,8 @@ def make_components_chart(
         showlegend=False,
         height=600,
         font=dict(size=10),
-        margin=dict(l=50, r=50, b=40, t=90),
+        margin=dict(l=50, r=10, b=40, t=90),
+        yaxis3=dict(tickformat="0.3f"),
     )
 
     for i in fig["layout"]["annotations"]:
@@ -457,7 +559,7 @@ def make_returns_chart(df_ret: pd.DataFrame) -> go.Figure:
     )
 
     # Returns Distribution
-    returns = pd.cut(df_ret.per_return, 100).value_counts().sort_index()
+    returns = pd.cut(df_ret.per_return, 50).value_counts().sort_index()
     midpoints = returns.index.map(lambda interval: interval.right).to_numpy()
     norm_dist = stats.norm.pdf(
         midpoints, loc=df_ret.per_return.mean(), scale=df_ret.per_return.std()
@@ -466,7 +568,7 @@ def make_returns_chart(df_ret: pd.DataFrame) -> go.Figure:
     fig.add_trace(
         go.Scatter(
             x=df_ret.index,
-            y=df_ret.per_return,
+            y=df_ret.per_return * 100,
             line=dict(width=1, color=COLORS[0]),
             name="return",
         ),
@@ -477,7 +579,7 @@ def make_returns_chart(df_ret: pd.DataFrame) -> go.Figure:
     fig.add_trace(
         go.Scatter(
             x=df_ret.index,
-            y=df_ret.per_return.cumsum(),
+            y=df_ret.per_return.cumsum() * 100,
             line=dict(width=1, color=COLORS[0]),
             name="cum. return",
         ),
@@ -540,11 +642,11 @@ def make_returns_chart(df_ret: pd.DataFrame) -> go.Figure:
     )
 
     fig.add_annotation(
-        text=(f"{df_ret.per_return.cumsum()[-1]:0.4f}"),
+        text=(f"{df_ret.per_return.cumsum()[-1] * 100:0.2f}"),
         xref="paper",
         yref="y3",
         x=0.465,
-        y=df_ret.per_return.cumsum()[-1],
+        y=df_ret.per_return.cumsum()[-1] * 100,
         xanchor="left",
         showarrow=False,
         align="left",
@@ -578,244 +680,17 @@ def make_returns_chart(df_ret: pd.DataFrame) -> go.Figure:
         height=600,
         font=dict(size=10),
         margin=dict(l=50, r=50, b=50, t=100),
+        yaxis=dict(tickformat="0.1f"),
+        yaxis3=dict(tickformat="0.1f"),
+        yaxis2=dict(tickformat="0.1f"),
+        yaxis4=dict(tickformat="0.1f"),
+        xaxis2=dict(tickformat="0.1f"),
+        xaxis4=dict(tickformat="0.1f"),
     )
 
     for i in fig["layout"]["annotations"]:
         i["font"]["size"] = 12
 
     fig.update_annotations(font=dict(size=10))
-
-    return fig
-
-
-def make_trade_prices_chart(
-    df: pd.DataFrame,
-    df_accum: pd.DataFrame,
-    df_trades: pd.DataFrame,
-) -> go.Figure:
-    df_result = df[df_accum.index.min() : df_accum.index.max()]
-
-    fig = go.Figure()
-
-    fig.add_scatter(
-        x=df_result[df_result.Side == 1].index,
-        y=df_result[df_result.Side == 1].PriceMillionths,
-        mode="markers",
-        name="Buy",
-        marker=dict(size=7, color=COLORS[0]),
-    )
-    fig.add_scatter(
-        x=df_result[df_result.Side == -1].index,
-        y=df_result[df_result.Side == -1].PriceMillionths,
-        mode="markers",
-        name="Sell",
-        marker=dict(size=7, color=COLORS[4]),
-    )
-    fig.add_scatter(
-        x=df_trades.index,
-        y=df_trades.StratTradePrice,
-        mode="markers",
-        name="Trade",
-        marker=dict(size=4, color=COLORS[1]),
-    )
-    fig.update_layout(
-        title=(
-            f"Trade Prices: {df.name}<br>{str(df_accum.index.min())[:19]} "
-            f"- {str(df_accum.index.max())[:19]}"
-        ),
-        xaxis_title="timestamp_utc_nanoseconds",
-        yaxis_title="PriceMillionths",
-    )
-
-    return fig
-
-
-def make_trade_sizes_chart(
-    df: pd.DataFrame,
-    df_accum: pd.DataFrame,
-    df_trades: pd.DataFrame,
-    bar_width: int = 3000,
-) -> go.Figure:
-    df_result = df[df_accum.index.min() : df_accum.index.max()]
-
-    fig = go.Figure()
-
-    fig.add_bar(
-        x=df_result[df_result.Side == 1].index,
-        y=df_result[df_result.Side == 1].SizeBillionths,
-        name="Buy",
-        marker_color=COLORS[0],
-        width=bar_width,
-    )
-    fig.add_bar(
-        x=df_result[df_result.Side == -1].index,
-        y=df_result[df_result.Side == -1].SizeBillionths * -1,
-        name="Sell",
-        marker_color=COLORS[4],
-        width=bar_width,
-    )
-    fig.add_bar(
-        x=df_trades.index,
-        y=df_trades.StratTradeSize * df_accum.iloc[0].Side,
-        name="Trade",
-        marker_color=COLORS[1],
-        width=bar_width,
-    )
-    fig.update_layout(
-        title=(
-            f"Trade Sizes: {df.name}<br>{str(df_accum.index.min())[:19]} "
-            f"- {str(df_accum.index.max())[:19]}"
-        ),
-        xaxis_title="timestamp_utc_nanoseconds",
-        yaxis_title="SizeBillionths",
-    )
-
-    return fig
-
-
-def make_participation_chart(
-    df_accum: pd.DataFrame, df_trades: pd.DataFrame, name: str = "BTC-USD"
-) -> go.Figure:
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-
-    fig.add_trace(
-        go.Scatter(
-            x=df_accum.index,
-            y=df_accum.CumSizeBillionths,
-            name="Cumulative Total Volume",
-            line=dict(color=COLORS[2]),
-        ),
-        secondary_y=True,
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=df_accum.index,
-            y=df_accum.CumParticipation,
-            name="Target Participation",
-            line=dict(color=COLORS[3]),
-        ),
-        secondary_y=False,
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=df_trades.index,
-            y=df_trades.StratTradeSize.cumsum(),
-            name="Actual Participation",
-            line=dict(color=COLORS[1]),
-        ),
-        secondary_y=False,
-    )
-
-    fig.update_layout(
-        title=(
-            f"Target vs. Actual Participation: {name}"
-            f"<br>{str(df_accum.index.min())[:19]} - {str(df_accum.index.max())[:19]}"
-        ),
-        xaxis_title="timestamp_utc_nanoseconds",
-        yaxis_title="SizeBillionths - Target and Actual",
-        yaxis2_title="SizeBillionths - Total",
-    )
-
-    return fig
-
-
-def get_result_hist(
-    df_results: pd.DataFrame, title_text: str = "IS and Time Distributions"
-) -> go.Figure:
-
-    fig = make_subplots(
-        rows=1,
-        cols=2,
-        subplot_titles=["Implementation Shortfall", "Execution Duration"],
-    )
-
-    fig.add_trace(
-        go.Histogram(x=df_results.IS, name="IS", histnorm="percent"), row=1, col=1
-    )
-
-    fig.add_trace(
-        go.Histogram(
-            x=df_results.execution_time.dt.seconds.divide(60),
-            name="execution_time",
-            histnorm="percent",
-        ),
-        row=1,
-        col=2,
-    )
-
-    IS_mean_line = dict(
-        type="line",
-        yref="paper",
-        y0=0.02,
-        y1=0.98,
-        xref="x",
-        line_dash="dot",
-        line_width=3,
-        x0=df_results.IS.mean(),
-        x1=df_results.IS.mean(),
-        line=dict(color=COLORS[3]),
-    )
-
-    ET_mean_line = dict(
-        type="line",
-        yref="paper",
-        y0=0.02,
-        y1=0.98,
-        xref="x2",
-        line_dash="dot",
-        line_width=3,
-        x0=df_results.execution_time.dt.seconds.divide(60).mean(),
-        x1=df_results.execution_time.dt.seconds.divide(60).mean(),
-        line=dict(color=COLORS[3]),
-    )
-
-    fig.update_layout(shapes=[IS_mean_line, ET_mean_line], title_text=title_text)
-
-    fig.add_annotation(
-        get_moments_annotation(
-            df_results.IS, "paper", "paper", 0.4, 0.98, "right", "IS", IS_labels
-        )
-    )
-
-    fig.add_annotation(
-        get_moments_annotation(
-            df_results.execution_time.dt.seconds.divide(60),
-            "paper",
-            "paper",
-            0.98,
-            0.98,
-            "right",
-            "Time",
-            ET_labels,
-        )
-    )
-
-    return fig
-
-
-def make_shortfall_time_scatter(
-    df_results: pd.DataFrame, n_trend_obs: int = 200
-) -> go.Figure:
-
-    ols_result = stats.linregress(
-        df_results.execution_time.dt.seconds.divide(60), df_results.IS
-    )
-    print(ols_result)
-
-    fig = px.scatter(
-        y=df_results.IS,
-        x=df_results.execution_time.dt.seconds.divide(60),
-        title="Implementation Shortfall vs. Execution Duration",
-        labels=dict(y="IS", x="execution_time"),
-    )
-
-    fig.add_scatter(
-        x=np.arange(n_trend_obs),
-        y=[ols_result.intercept + ols_result.slope * x for x in np.arange(n_trend_obs)],
-    )
-
-    fig.update_layout(showlegend=False)
 
     return fig
