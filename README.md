@@ -25,8 +25,8 @@ Our investment period spans from 2015-01-01 to 2021-04-22. We mark to market bac
 * All of the strategies experienced catastrophic losses as a result of extreme jumps in yields at the onset of the pandemic. The strategy involving the Indonesian Rupiah lost over 40% in a single day.
 
 ## Returns
-[![returns](returns.png)]
+![returns](returns.png)
 
 ## Underlying Securities
-[![components](components.png)]
+![components](components.png)
 
