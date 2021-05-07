@@ -23,7 +23,7 @@ gitpython = "*"
 tabulate = "*"
 nbformat = "*"
 ipywidgets = "*"
-boto3 = "*"
+s3fs = "*"
 
 [requires]
 python_version = "3.8"

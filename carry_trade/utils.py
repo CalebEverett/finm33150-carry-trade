@@ -117,7 +117,7 @@ def reindex_and_interpolate(df, yc: bool = False):
 def load_yc(tickers: List) -> Dict:
     """Loads yield curves."""
 
-    dfs_yc = {t: pd.read_csv(f"data/df_{t}.csv") for t in tickers}
+    dfs_yc = {t: pd.read_csv(f"s3://finm33150/carry-trade/df_{t}.csv") for t in tickers}
 
     for k in dfs_yc:
         dfs_yc[k] = reindex_and_interpolate(dfs_yc[k], yc=True)
@@ -128,7 +128,9 @@ def load_yc(tickers: List) -> Dict:
 def load_fx(currencies: List) -> Dict:
     """Load foreign exchange rates."""
 
-    dfs_fx = {c: pd.read_csv(f"data/df_fx_{c}.csv") for c in currencies}
+    dfs_fx = {
+        c: pd.read_csv(f"s3://finm33150/carry-trade/df_fx_{c}.csv") for c in currencies
+    }
 
     for k in dfs_fx:
         dfs_fx[k] = reindex_and_interpolate(dfs_fx[k])
@@ -139,7 +141,9 @@ def load_fx(currencies: List) -> Dict:
 def load_libor(libors: List) -> Dict:
     """Loads 3 month libors."""
 
-    dfs_libor = {l: pd.read_csv(f"data/df_libor_{l}.csv") for l in libors}
+    dfs_libor = {
+        l: pd.read_csv(f"s3://finm33150/carry-trade/df_libor_{l}.csv") for l in libors
+    }
     dfs_libor["JPY3MTD156N"].value = (
         dfs_libor["JPY3MTD156N"].value.replace(".", None).astype(float)
     )

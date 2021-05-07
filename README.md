@@ -1,5 +1,5 @@
 [![build status](https://github.com/CalebEverett/finm33150-carry-trade/actions/workflows/build.yml/badge.svg)](https://github.com/CalebEverett/finm33150-carry-trade/actions/workflows/build.yml)
-[![nbviewer](https://raw.githubusercontent.com/jupyter/design/master/logos/Badges/nbviewer_badge.svg)](https://nbviewer.jupyter.org/github/CalebEverett/finm33150-carry-trade/blob/master/carry_trade.ipynb)
+[![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/CalebEverett/finm33150-carry-trade/HEAD?filepath=carry_trade.ipynb)
 
 
 # FINM33150 - Carry Trade
